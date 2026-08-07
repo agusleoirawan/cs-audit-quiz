@@ -14,21 +14,49 @@
    ========================================================= */
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
-const auth = firebase.auth();
-const db = firebase.firestore();
-try{ db.enablePersistence({synchronizeTabs:true}); }catch(e){ /* multi-tab / unsupported browser, aman diabaikan */ }
+let auth, db;
+let firebaseInitOk = true;
+try{
+  auth = firebase.auth();
+  db = firebase.firestore();
+  try{ db.enablePersistence({synchronizeTabs:true}); }catch(e){ /* multi-tab / unsupported browser, aman diabaikan */ }
+}catch(err){
+  firebaseInitOk = false;
+  console.error('Firebase init error', err);
+  window.addEventListener('DOMContentLoaded', ()=>showBootError('inisialisasi Firebase (cek js/firebase-config.js)', err));
+}
 
 let DB = { periods:[], questions:{}, results:[] };
 const dataLoaded = { periods:false, questions:false, results:false };
 
 function isDataReady(){ return dataLoaded.periods && dataLoaded.questions && dataLoaded.results; }
 
+function showBootError(label, err){
+  const loader = document.getElementById('bootLoader');
+  if(!loader) return;
+  loader.innerHTML = `
+    <div style="max-width:320px; text-align:center; padding:0 20px;">
+      <div style="font-size:32px;">⚠️</div>
+      <div style="font-weight:700; margin-top:10px; font-size:14px;">Gagal memuat: ${label}</div>
+      <div style="font-size:11.5px; color:#a00; background:#fff0f0; border-radius:8px; padding:8px 10px; margin-top:10px; word-break:break-word; font-family:monospace;">
+        ${err && err.code ? err.code : ''}<br>${err && err.message ? err.message : String(err)}
+      </div>
+      <div style="font-size:11.5px; color:#4a5872; margin-top:12px; text-align:left;">
+        Kemungkinan penyebab:<br>
+        • Firestore Rules belum di-Publish<br>
+        • firebase-config.js belum diisi nilai asli<br>
+        • Firestore database belum selesai dibuat<br>
+        • Tidak ada koneksi internet
+      </div>
+    </div>`;
+}
+
 function initFirebaseListeners(){
   db.collection('periods').orderBy('createdAt','asc').onSnapshot(snap=>{
     DB.periods = snap.docs.map(d=>({id:d.id, ...d.data()}));
     dataLoaded.periods = true;
     onDataChanged();
-  }, err=>{ console.error('periods listener error', err); toast('Gagal memuat data periode'); });
+  }, err=>{ console.error('periods listener error', err); toast('Gagal memuat data periode'); showBootError('periods', err); });
 
   db.collection('questions').onSnapshot(snap=>{
     const map = {};
@@ -36,19 +64,26 @@ function initFirebaseListeners(){
     DB.questions = map;
     dataLoaded.questions = true;
     onDataChanged();
-  }, err=>{ console.error('questions listener error', err); toast('Gagal memuat data soal'); });
+  }, err=>{ console.error('questions listener error', err); toast('Gagal memuat data soal'); showBootError('questions', err); });
 
   db.collection('results').orderBy('ts','desc').onSnapshot(snap=>{
     DB.results = snap.docs.map(d=>({id:d.id, ...d.data()}));
     dataLoaded.results = true;
     onDataChanged();
-  }, err=>{ console.error('results listener error', err); toast('Gagal memuat data hasil'); });
+  }, err=>{ console.error('results listener error', err); toast('Gagal memuat data hasil'); showBootError('results', err); });
 
   auth.onAuthStateChanged(user=>{
     state.isAdmin = !!user;
     state.adminEmail = user ? user.email : null;
     if(isDataReady()) render();
   });
+
+  // Kalau setelah 10 detik masih belum ready & belum ada error spesifik, kasih tahu juga
+  setTimeout(()=>{
+    if(!firstRenderDone){
+      showBootError('koneksi ke Firestore', {message:'Tidak ada respon setelah 10 detik. Cek console.firebase.google.com → pastikan Firestore Database sudah dibuat & Rules sudah di-Publish.'});
+    }
+  }, 10000);
 }
 
 let firstRenderDone = false;
@@ -935,7 +970,7 @@ function render(){
   window.scrollTo(0,0);
 }
 
-initFirebaseListeners();
+if(firebaseInitOk){ initFirebaseListeners(); }
 
 /* =========================================================
    PWA: SERVICE WORKER REGISTRATION + INSTALL PROMPT
@@ -977,13 +1012,13 @@ window.addEventListener('appinstalled', ()=>{
   toast('CS Audit Quiz sudah terpasang di HP kamu');
 });
 
-/* Sembunyikan splash screen setelah app pertama kali dirender */
-window.addEventListener('load', ()=>{
+/* Sembunyikan splash screen — pakai timer tetap (BUKAN menunggu window 'load')
+   supaya tidak nyangkut kalau ada resource yang lambat/gagal dimuat. */
+(function hideSplashScreen(){
   const splash = document.getElementById('splashScreen');
-  if(splash){
-    setTimeout(()=>{
-      splash.classList.add('splash-hide');
-      setTimeout(()=>splash.remove(), 500);
-    }, 600);
-  }
-});
+  if(!splash) return;
+  setTimeout(()=>{
+    splash.classList.add('splash-hide');
+    setTimeout(()=>splash.remove(), 500);
+  }, 900);
+})();
