@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>CS Audit Quiz</title>
+
+<!-- ================= PWA META TAGS ================= -->
+<meta name="theme-color" content="#2563EB">
+<meta name="description" content="Media pembelajaran mingguan untuk Agent Customer Service berdasarkan hasil audit tim QA.">
+<link rel="manifest" href="manifest.json">
+
+<!-- Icons -->
+<link rel="icon" type="image/x-icon" href="icons/favicon.ico">
+<link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+
+<!-- iOS PWA support -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CS Quiz">
+
+<!-- Windows tiles -->
+<meta name="msapplication-TileColor" content="#2563EB">
+<meta name="msapplication-TileImage" content="icons/icon-192.png">
+<meta name="msapplication-config" content="browserconfig.xml">
+
+<!-- App shell CSS -->
+<link rel="stylesheet" href="css/style.css">
+<!-- ================================================== -->
+</head>
+<body>
+
+<!-- ================= SPLASH SCREEN (PWA) ================= -->
+<div id="splashScreen">
+  <img src="icons/icon-192.png" alt="CS Audit Quiz">
+  <div class="splash-title">CS Audit Quiz</div>
+  <div class="splash-sub">Menyiapkan aplikasi...</div>
+</div>
+<!-- ========================================================= -->
+
+<div class="topbar">
+  <button class="back-btn hidden" id="backBtn">←</button>
+  <div class="title">
+    <h1 id="pageTitle">CS Audit Quiz</h1>
+    <span id="pageSub">Media belajar mingguan tim CS</span>
+  </div>
+  <button class="icon-btn hidden" id="installAppBtn">⬇ Install App</button>
+  <button class="icon-btn" id="themeBtn" title="Dark mode">🌙</button>
+</div>
+
+<!-- Loader saat data pertama kali dimuat dari Firebase -->
+<div id="bootLoader" style="position:fixed; inset:0; z-index:998; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; background:var(--bg, #f4f7fd);">
+  <div style="width:38px; height:38px; border-radius:50%; border:4px solid #e1e8f5; border-top-color:#1d63e0; animation:spin 0.8s linear infinite;"></div>
+  <span style="font-size:12.5px; color:#4a5872;">Menyambungkan ke server...</span>
+</div>
+<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+
+<div class="wrap" id="app"></div>
+<div class="toast" id="toast"></div>
+<div class="modal-overlay hidden" id="modalOverlay"><div class="modal-box" id="modalBox"></div></div>
+
+<!-- Firebase SDK (compat, cukup lewat <script> tag, tanpa build tools) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<!-- Konfigurasi project Firebase kamu (isi API key dsb di sini) -->
+<script src="js/firebase-config.js"></script>
+
+<!-- App logic (quiz, admin, dashboard, dst — TIDAK diubah) + registrasi PWA di bagian bawah file -->
+<script src="js/app.js"></script>
+</body>
+</html>
