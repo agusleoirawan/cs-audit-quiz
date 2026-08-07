@@ -10,7 +10,7 @@
    offline sendiri via IndexedDB) supaya data selalu konsisten.
    ========================================================= */
 
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = `cs-audit-quiz-${CACHE_VERSION}`;
 
 const APP_SHELL = [
