@@ -2,12 +2,15 @@
    SERVICE WORKER — CS Audit Quiz
    Strategi: cache-first untuk app shell (HTML/CSS/JS/icons),
    supaya aplikasi tetap bisa dibuka & dipakai offline.
-   Data quiz (soal, hasil, leaderboard) tetap disimpan di
-   LocalStorage seperti sebelumnya — service worker ini TIDAK
-   menyentuh atau mengubah LocalStorage sama sekali.
+
+   PENTING: data quiz sekarang disimpan di Firebase Firestore
+   (bukan LocalStorage lagi). Service worker ini SENGAJA tidak
+   ikut campur dengan request ke Firebase/Google API — biarkan
+   itu ditangani langsung oleh Firebase SDK (yang punya cache
+   offline sendiri via IndexedDB) supaya data selalu konsisten.
    ========================================================= */
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = `cs-audit-quiz-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -16,19 +19,32 @@ const APP_SHELL = [
   './manifest.json',
   './css/style.css',
   './js/app.js',
+  './js/firebase-config.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-512-maskable.png',
   './icons/apple-touch-icon.png',
-  './icons/favicon.ico'
+  './icons/favicon.ico',
+  'https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',
+  'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js',
+  'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js'
 ];
 
-/* ---------- INSTALL: simpan app shell ke cache ---------- */
+// Domain yang TIDAK boleh disentuh service worker (biar Firebase SDK
+// yang urus langsung, termasuk offline cache-nya sendiri)
+const BYPASS_PATTERNS = ['googleapis.com', 'firebaseio.com', 'google.com/recaptcha'];
+function shouldBypass(url){
+  return BYPASS_PATTERNS.some(p => url.includes(p));
+}
+
+/* ---------- INSTALL: simpan app shell ke cache (per-file, tahan gagal satu file) ---------- */
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
-      .then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then(async (cache) => {
+      await Promise.all(APP_SHELL.map((url) =>
+        cache.add(url).catch((err) => console.warn('[SW] gagal cache:', url, err))
+      ));
+    }).then(() => self.skipWaiting())
   );
 });
 
@@ -56,8 +72,8 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
 
-  // Hanya tangani request GET
-  if (req.method !== 'GET') return;
+  // Hanya tangani request GET, dan lewati request ke Firebase/Google API
+  if (req.method !== 'GET' || shouldBypass(req.url)) return;
 
   event.respondWith(
     caches.match(req).then((cached) => {
@@ -65,11 +81,10 @@ self.addEventListener('fetch', (event) => {
 
       return fetch(req)
         .then((networkRes) => {
-          // simpan salinan ke cache untuk offline berikutnya
+          // simpan salinan ke cache untuk offline berikutnya (termasuk CDN gstatic)
           const resClone = networkRes.clone();
           caches.open(CACHE_NAME).then((cache) => {
-            // hanya cache response yang valid & same-origin
-            if (networkRes.ok && req.url.startsWith(self.location.origin)) {
+            if (networkRes.ok || networkRes.type === 'opaque') {
               cache.put(req, resClone);
             }
           });
