@@ -1,42 +1,99 @@
 /* =========================================================
-   DATA LAYER (storage.js equivalent)
-   Struktur disatukan dalam satu object supaya gampang nanti
-   dipindah ke Firebase/Supabase — tinggal ganti fungsi
-   loadDB()/saveDB() dengan pemanggilan API.
+   DATA LAYER — Firebase Firestore + Auth
+   Sebelumnya pakai LocalStorage (data per-HP). Sekarang semua
+   soal, periode, dan hasil quiz disimpan di Firestore supaya
+   real-time ter-sinkron ke semua HP tim. Login Admin memakai
+   Firebase Authentication (Email/Password), bukan lagi
+   username/password yang disimpan manual.
+
+   Cache lokal "DB" di bawah ini otomatis diperbarui oleh
+   onSnapshot() setiap kali ada perubahan di server — jadi
+   seluruh fungsi render() di file ini TETAP membaca dari
+   DB.periods / DB.questions / DB.results seperti sebelumnya,
+   tidak perlu diubah satu-satu.
    ========================================================= */
-const DB_KEY = 'csaq_db_v1';
-
-function defaultQuestions(){
-  return [
-    {id:uid(), question:'Apa SLA Follow Up untuk kasus Resolution?', options:['12 Jam','24 Jam','48 Jam','72 Jam'], answer:1, explanation:'SLA Follow Up Resolution yang berlaku adalah 24 Jam sejak kasus dibuka.'},
-    {id:uid(), question:'Saat Merchant komplain refund belum masuk, langkah pertama Agent adalah?', options:['Langsung tutup tiket','Cek status refund di sistem payment','Minta Merchant menunggu 7 hari','Eskalasi tanpa pengecekan'], answer:1, explanation:'Agent wajib mengecek status refund di sistem payment sebelum memberi jawaban ke Merchant.'},
-    {id:uid(), question:'Dokumen apa yang wajib dilampirkan saat submit kasus ke tim Partner?', options:['Screenshot chat saja','Bukti transaksi & kronologi lengkap','Tidak perlu dokumen','Nomor HP customer saja'], answer:1, explanation:'Tim Partner mewajibkan bukti transaksi dan kronologi lengkap agar investigasi lebih cepat.'},
-    {id:uid(), question:'Bahasa yang benar saat menjawab komplain customer adalah?', options:['Menyalahkan sistem','Empati, jelas, dan solutif','Menjanjikan hal di luar kewenangan','Mengabaikan keluhan'], answer:1, explanation:'Agent harus menjawab dengan empati, jelas, dan memberikan solusi sesuai SOP.'},
-    {id:uid(), question:'Kapan kasus wajib dieskalasi ke supervisor?', options:['Setiap ada pertanyaan mudah','Saat di luar kewenangan Agent atau melewati SLA','Tidak pernah','Hanya jika diminta customer'], answer:1, explanation:'Eskalasi dilakukan saat kasus di luar kewenangan Agent atau berpotensi melewati SLA.'},
-  ];
-}
-
-function seedDB(){
-  const periodId = uid();
-  return {
-    admin:{username:'admin', password:'admin123'},
-    periods:[{id:periodId, name:'Week 1', createdAt:Date.now(), active:true}],
-    questions:{[periodId]: defaultQuestions()},
-    results:[]
-  };
-}
-
-function loadDB(){
-  try{
-    const raw = localStorage.getItem(DB_KEY);
-    if(!raw){ const db = seedDB(); saveDB(db); return db; }
-    return JSON.parse(raw);
-  }catch(e){ const db = seedDB(); saveDB(db); return db; }
-}
-function saveDB(db){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
 
-let DB = loadDB();
+const auth = firebase.auth();
+const db = firebase.firestore();
+try{ db.enablePersistence({synchronizeTabs:true}); }catch(e){ /* multi-tab / unsupported browser, aman diabaikan */ }
+
+let DB = { periods:[], questions:{}, results:[] };
+const dataLoaded = { periods:false, questions:false, results:false };
+
+function isDataReady(){ return dataLoaded.periods && dataLoaded.questions && dataLoaded.results; }
+
+function initFirebaseListeners(){
+  db.collection('periods').orderBy('createdAt','asc').onSnapshot(snap=>{
+    DB.periods = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    dataLoaded.periods = true;
+    onDataChanged();
+  }, err=>{ console.error('periods listener error', err); toast('Gagal memuat data periode'); });
+
+  db.collection('questions').onSnapshot(snap=>{
+    const map = {};
+    snap.docs.forEach(d=>{ map[d.id] = (d.data().items)||[]; });
+    DB.questions = map;
+    dataLoaded.questions = true;
+    onDataChanged();
+  }, err=>{ console.error('questions listener error', err); toast('Gagal memuat data soal'); });
+
+  db.collection('results').orderBy('ts','desc').onSnapshot(snap=>{
+    DB.results = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    dataLoaded.results = true;
+    onDataChanged();
+  }, err=>{ console.error('results listener error', err); toast('Gagal memuat data hasil'); });
+
+  auth.onAuthStateChanged(user=>{
+    state.isAdmin = !!user;
+    state.adminEmail = user ? user.email : null;
+    if(isDataReady()) render();
+  });
+}
+
+let firstRenderDone = false;
+function onDataChanged(){
+  if(!isDataReady()) return;
+  // Jangan render ulang kalau ada modal terbuka (misal admin lagi ngetik form),
+  // biar tidak keganggu update real-time dari device lain.
+  const modalOpen = !document.getElementById('modalOverlay').classList.contains('hidden');
+  if(modalOpen || state.view === 'quiz') return;
+  render();
+  if(!firstRenderDone){ firstRenderDone = true; hideBootLoader(); }
+}
+function hideBootLoader(){
+  const el = document.getElementById('bootLoader');
+  if(el) el.remove();
+}
+
+/* ---- Firestore write helpers (dipanggil dari fungsi UI di bawah) ---- */
+async function fbCreatePeriod(name, active){
+  const id = uid();
+  if(active){
+    const batch = db.batch();
+    DB.periods.forEach(p=> batch.update(db.collection('periods').doc(p.id), {active:false}));
+    batch.set(db.collection('periods').doc(id), {name, createdAt:Date.now(), active:true});
+    await batch.commit();
+  } else {
+    await db.collection('periods').doc(id).set({name, createdAt:Date.now(), active:false});
+  }
+  await db.collection('questions').doc(id).set({items:[]});
+  return id;
+}
+async function fbSetActivePeriod(periodId){
+  const batch = db.batch();
+  DB.periods.forEach(p=> batch.update(db.collection('periods').doc(p.id), {active: p.id===periodId}));
+  await batch.commit();
+}
+async function fbSaveQuestions(periodId, items){
+  await db.collection('questions').doc(periodId).set({items});
+}
+async function fbAddResult(result){
+  await db.collection('results').doc(result.id).set(result);
+}
+async function fbDeleteResult(resultId){
+  await db.collection('results').doc(resultId).delete();
+}
 
 /* =========================================================
    APP STATE / ROUTER
@@ -170,24 +227,37 @@ function adminGate(dest){
   if(state.isAdmin){ go(dest); return; }
   openModal(`
     <h3>Login Admin</h3>
-    <p style="color:var(--ink-soft); font-size:12.5px; margin-bottom:14px;">Masuk untuk mengelola soal & dashboard.</p>
-    <label>Username</label>
-    <input type="text" id="admUser" placeholder="admin">
+    <p style="color:var(--ink-soft); font-size:12.5px; margin-bottom:14px;">Masuk untuk mengelola soal & dashboard. Akun dibuat lewat Firebase Console.</p>
+    <label>Email</label>
+    <input type="text" id="admUser" placeholder="admin@perusahaan.com">
     <label>Password</label>
-    <input type="password" id="admPass" placeholder="admin123">
+    <input type="password" id="admPass" placeholder="Password admin">
     <div class="row-btns" style="margin-top:18px;">
       <button class="btn secondary" id="admCancel">Batal</button>
       <button class="btn" id="admSubmit">Masuk</button>
     </div>
   `);
   document.getElementById('admCancel').onclick = closeModal;
-  document.getElementById('admSubmit').onclick = ()=>{
+  document.getElementById('admSubmit').onclick = async ()=>{
     const u = document.getElementById('admUser').value.trim();
     const p = document.getElementById('admPass').value;
-    if(u===DB.admin.username && p===DB.admin.password){
-      state.isAdmin = true; closeModal(); toast('Login admin berhasil'); go(dest);
-    } else { toast('Username atau password salah'); }
+    const btn = document.getElementById('admSubmit');
+    btn.disabled = true; btn.textContent = 'Memproses...';
+    try{
+      await auth.signInWithEmailAndPassword(u, p);
+      closeModal(); toast('Login admin berhasil'); go(dest);
+    }catch(err){
+      btn.disabled = false; btn.textContent = 'Masuk';
+      toast('Email atau password salah');
+    }
   };
+}
+function adminLogout(){
+  confirmModal('Keluar dari akun admin?', async ()=>{
+    await auth.signOut();
+    toast('Berhasil logout');
+    go('home', {push:false});
+  });
 }
 
 /* =========================================================
@@ -316,7 +386,7 @@ function renderQuiz(){
   };
 }
 
-function submitQuiz(){
+async function submitQuiz(){
   clearInterval(timerInt);
   const q = state.quiz;
   const durationSec = Math.floor((Date.now()-q.startTime)/1000);
@@ -334,8 +404,14 @@ function submitQuiz(){
     periodId:q.period.id, periodName:q.period.name,
     ts:Date.now(), durationSec, score, correct, wrong, answers
   };
-  DB.results.push(result);
-  saveDB(DB);
+  toast('Menyimpan hasil...');
+  try{
+    await fbAddResult(result);
+  }catch(err){
+    console.error(err);
+    toast('Gagal menyimpan, cek koneksi internet');
+  }
+  DB.results.unshift(result); // tampilkan langsung, listener akan menyamakan nanti
   state.lastResult = result;
   state.quiz = null;
   go('quizResult', {push:false});
@@ -520,29 +596,38 @@ function renderManage(){
         </div>
       `).join('')
     }
-    <div class="section-title"><h3>Pengaturan Admin</h3></div>
+    <div class="section-title"><h3>Akun Admin</h3></div>
     <div class="card">
-      <button class="btn secondary" id="changeCredBtn">Ubah Username / Password Admin</button>
+      <p style="font-size:12.5px; color:var(--ink-soft); margin-bottom:12px;">Masuk sebagai <b>${escapeHtml(state.adminEmail||'-')}</b></p>
+      <div class="row-btns">
+        <button class="btn secondary" id="changePassBtn">Ganti Password</button>
+        <button class="btn secondary" id="logoutBtn">Logout</button>
+      </div>
     </div>
   `;
 
   document.getElementById('mgPeriodSel').onchange = e=>{ state.manageState.periodId = e.target.value; renderManage(); };
   document.getElementById('newPeriodBtn').onclick = openNewPeriodModal;
   const setActiveBtn = document.getElementById('setActiveBtn');
-  if(setActiveBtn) setActiveBtn.onclick = ()=>{
-    DB.periods.forEach(p=>p.active=(p.id===pid));
-    saveDB(DB); toast('Periode aktif diperbarui'); renderManage();
+  if(setActiveBtn) setActiveBtn.onclick = async ()=>{
+    setActiveBtn.disabled = true; setActiveBtn.textContent = 'Menyimpan...';
+    try{ await fbSetActivePeriod(pid); toast('Periode aktif diperbarui'); }
+    catch(err){ toast('Gagal menyimpan, cek koneksi'); }
+    renderManage();
   };
   document.getElementById('addQBtn').onclick = ()=>openQuestionForm(null, pid);
   document.getElementById('previewBtn').onclick = ()=>openPreview(pid);
   document.getElementById('exportJsonBtn').onclick = ()=>exportQuestionsJson(pid);
   document.getElementById('uploadJsonInput').onchange = (e)=>handleUploadJson(e, pid);
-  document.getElementById('changeCredBtn').onclick = openChangeCredModal;
+  document.getElementById('logoutBtn').onclick = adminLogout;
+  document.getElementById('changePassBtn').onclick = openChangePasswordModal;
   $app.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openQuestionForm(b.dataset.edit, pid));
   $app.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
-    confirmModal('Hapus soal ini?', ()=>{
-      DB.questions[pid] = DB.questions[pid].filter(q=>q.id!==b.dataset.del);
-      saveDB(DB); toast('Soal dihapus'); renderManage();
+    confirmModal('Hapus soal ini?', async ()=>{
+      const items = (DB.questions[pid]||[]).filter(q=>q.id!==b.dataset.del);
+      try{ await fbSaveQuestions(pid, items); toast('Soal dihapus'); }
+      catch(err){ toast('Gagal menghapus, cek koneksi'); }
+      renderManage();
     });
   });
 }
@@ -557,22 +642,22 @@ function openNewPeriodModal(){
     </label>
     <button class="btn" style="margin-top:16px;" id="npSubmit">Buat Periode</button>
   `);
-  document.getElementById('npSubmit').onclick = ()=>{
+  document.getElementById('npSubmit').onclick = async ()=>{
     const name = document.getElementById('npName').value.trim();
     if(!name){ toast('Nama periode wajib diisi'); return; }
     const active = document.getElementById('npActive').checked;
-    const id = uid();
-    if(active) DB.periods.forEach(p=>p.active=false);
-    DB.periods.push({id, name, createdAt:Date.now(), active});
-    DB.questions[id] = [];
-    saveDB(DB);
-    state.manageState.periodId = id;
-    closeModal(); toast('Periode dibuat'); renderManage();
+    const btn = document.getElementById('npSubmit');
+    btn.disabled = true; btn.textContent = 'Membuat...';
+    try{
+      const id = await fbCreatePeriod(name, active);
+      state.manageState.periodId = id;
+      closeModal(); toast('Periode dibuat'); renderManage();
+    }catch(err){ btn.disabled=false; btn.textContent='Buat Periode'; toast('Gagal membuat periode, cek koneksi'); }
   };
 }
 
 function openQuestionForm(qid, pid){
-  const existing = qid ? DB.questions[pid].find(q=>q.id===qid) : null;
+  const existing = qid ? (DB.questions[pid]||[]).find(q=>q.id===qid) : null;
   openModal(`
     <h3>${existing?'Edit Soal':'Tambah Soal'}</h3>
     <label>Pertanyaan</label>
@@ -589,19 +674,23 @@ function openQuestionForm(qid, pid){
     <textarea id="qfExplain">${escapeHtml(existing?.explanation||'')}</textarea>
     <button class="btn" style="margin-top:16px;" id="qfSubmit">Simpan Soal</button>
   `);
-  document.getElementById('qfSubmit').onclick = ()=>{
+  document.getElementById('qfSubmit').onclick = async ()=>{
     const question = document.getElementById('qfQuestion').value.trim();
     const options = ['qfA','qfB','qfC','qfD'].map(id=>document.getElementById(id).value.trim());
     const answer = parseInt(document.getElementById('qfAnswer').value);
     const explanation = document.getElementById('qfExplain').value.trim();
     if(!question || options.some(o=>!o)){ toast('Lengkapi semua field'); return; }
-    if(!DB.questions[pid]) DB.questions[pid]=[];
+    const btn = document.getElementById('qfSubmit');
+    btn.disabled = true; btn.textContent = 'Menyimpan...';
+    const items = [...(DB.questions[pid]||[])];
     if(existing){
-      Object.assign(existing, {question, options, answer, explanation});
+      const idx = items.findIndex(q=>q.id===existing.id);
+      items[idx] = {...existing, question, options, answer, explanation};
     } else {
-      DB.questions[pid].push({id:uid(), question, options, answer, explanation});
+      items.push({id:uid(), question, options, answer, explanation});
     }
-    saveDB(DB); closeModal(); toast('Soal disimpan'); renderManage();
+    try{ await fbSaveQuestions(pid, items); closeModal(); toast('Soal disimpan'); renderManage(); }
+    catch(err){ btn.disabled=false; btn.textContent='Simpan Soal'; toast('Gagal menyimpan, cek koneksi'); }
   };
 }
 
@@ -615,22 +704,22 @@ function handleUploadJson(e, pid){
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
-  reader.onload = (ev)=>{
+  reader.onload = async (ev)=>{
     try{
       const arr = JSON.parse(ev.target.result);
       if(!Array.isArray(arr)) throw new Error('bukan array');
+      const items = [...(DB.questions[pid]||[])];
       let added = 0;
       arr.forEach(item=>{
         if(item && item.question && Array.isArray(item.options) && item.options.length===4 && typeof item.answer==='number'){
-          if(!DB.questions[pid]) DB.questions[pid]=[];
-          DB.questions[pid].push({id:uid(), question:item.question, options:item.options, answer:item.answer, explanation:item.explanation||''});
+          items.push({id:uid(), question:item.question, options:item.options, answer:item.answer, explanation:item.explanation||''});
           added++;
         }
       });
-      saveDB(DB);
+      await fbSaveQuestions(pid, items);
       toast(`${added} soal berhasil di-upload`);
       renderManage();
-    }catch(err){ toast('File JSON tidak valid'); }
+    }catch(err){ toast('File JSON tidak valid atau gagal upload'); }
   };
   reader.readAsText(file);
   e.target.value = '';
@@ -659,21 +748,32 @@ function openPreview(pid){
   `);
 }
 
-function openChangeCredModal(){
+function openChangePasswordModal(){
   openModal(`
-    <h3>Ubah Kredensial Admin</h3>
-    <label>Username Baru</label>
-    <input type="text" id="ccUser" value="${escapeHtml(DB.admin.username)}">
+    <h3>Ganti Password Admin</h3>
+    <p style="color:var(--ink-soft); font-size:12.5px; margin-bottom:14px;">Masukkan password lama untuk verifikasi, lalu password baru.</p>
+    <label>Password Lama</label>
+    <input type="password" id="cpOld" placeholder="Password saat ini">
     <label>Password Baru</label>
-    <input type="password" id="ccPass" value="${escapeHtml(DB.admin.password)}">
-    <button class="btn" style="margin-top:16px;" id="ccSubmit">Simpan</button>
+    <input type="password" id="cpNew" placeholder="Minimal 6 karakter">
+    <button class="btn" style="margin-top:16px;" id="cpSubmit">Simpan Password Baru</button>
   `);
-  document.getElementById('ccSubmit').onclick = ()=>{
-    const u = document.getElementById('ccUser').value.trim();
-    const p = document.getElementById('ccPass').value.trim();
-    if(!u || !p){ toast('Username & password wajib diisi'); return; }
-    DB.admin.username = u; DB.admin.password = p;
-    saveDB(DB); closeModal(); toast('Kredensial admin diperbarui');
+  document.getElementById('cpSubmit').onclick = async ()=>{
+    const oldPass = document.getElementById('cpOld').value;
+    const newPass = document.getElementById('cpNew').value;
+    if(!oldPass || newPass.length<6){ toast('Password baru minimal 6 karakter'); return; }
+    const btn = document.getElementById('cpSubmit');
+    btn.disabled = true; btn.textContent = 'Menyimpan...';
+    try{
+      const user = auth.currentUser;
+      const cred = firebase.auth.EmailAuthProvider.credential(user.email, oldPass);
+      await user.reauthenticateWithCredential(cred);
+      await user.updatePassword(newPass);
+      closeModal(); toast('Password berhasil diubah');
+    }catch(err){
+      btn.disabled = false; btn.textContent = 'Simpan Password Baru';
+      toast('Gagal mengubah password, cek password lama');
+    }
   };
 }
 
@@ -681,7 +781,7 @@ function openChangeCredModal(){
    ADMIN: DASHBOARD
    ========================================================= */
 function renderDashboard(){
-  $title.textContent='Dashboard Admin'; $sub.textContent='Statistik & hasil'; $back.classList.remove('hidden');
+  $title.textContent='Dashboard Admin'; $sub.textContent=state.adminEmail||'Statistik & hasil'; $back.classList.remove('hidden');
   const pid = state.dashPeriod;
   const results = DB.results.filter(r => pid==='all' ? true : r.periodId===pid);
   const totalPeserta = new Set(DB.results.map(r=>r.name.toLowerCase()+r.team)).size;
@@ -748,9 +848,10 @@ function renderDashboard(){
   document.getElementById('exportCsvBtn').onclick = ()=>exportResultsCsv(results);
   $app.querySelectorAll('[data-reset]').forEach(b=>{
     b.onclick = ()=>{
-      confirmModal('Reset hasil ini agar agent bisa mengerjakan ulang?', ()=>{
-        DB.results = DB.results.filter(r=>r.id!==b.dataset.reset);
-        saveDB(DB); toast('Hasil direset'); renderDashboard();
+      confirmModal('Reset hasil ini agar agent bisa mengerjakan ulang?', async ()=>{
+        try{ await fbDeleteResult(b.dataset.reset); toast('Hasil direset'); }
+        catch(err){ toast('Gagal reset, cek koneksi'); }
+        renderDashboard();
       });
     };
   });
@@ -834,7 +935,7 @@ function render(){
   window.scrollTo(0,0);
 }
 
-render();
+initFirebaseListeners();
 
 /* =========================================================
    PWA: SERVICE WORKER REGISTRATION + INSTALL PROMPT
